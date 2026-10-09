@@ -1,19 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+
 import { sampleWorkspace, emptyWorkspace, balance, quote, conflict } from '../shared/rental.js';
 import { applyCommand } from '../server/commands.js';
-import { handleApi } from '../server/worker.js';
+import { handleApi } from '../supabase/functions/_shared/api.js';
 const future=hours=>new Date(Date.now()+hours*3600000).toISOString();
 const command=(action,data)=>({commandId:crypto.randomUUID(),action,data});
 function fresh(){const sample=sampleWorkspace();return {...emptyWorkspace('Test rentals'),vehicles:[sample.vehicles[0],sample.vehicles[8]],customers:[sample.customers[0]]};}
 function request(state,start=future(24),end=future(48)){return applyCommand(state,command('createBooking',{vehicleId:'v1',customerId:'c1',start,end,mode:'Self-drive'}));}
 function confirm(state,id=state.bookings[0].id){return applyCommand(state,command('confirm',{id}));}
-function database(){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../drizzle/0000_easy_deathbird.sql',import.meta.url),'utf8'));return {db,env:{DB:{prepare(sql){let args=[];return {bind(...values){args=values;return this;},async first(){return db.prepare(sql).get(...args)||null;},async run(){const result=db.prepare(sql).run(...args);return {meta:{changes:Number(result.changes)}};}};}}}};}
-function api(path,method='GET',input,owner='test-owner'){const headers={};if(owner)headers['oai-authenticated-user-id']=owner;if(input)headers['Content-Type']='application/json';return new Request(`https://renter.test${path}`,{method,headers,body:input?JSON.stringify(input):undefined});}
-
+function database(){
+ const db=new DatabaseSync(':memory:');db.exec('CREATE TABLE workspaces(owner_id TEXT PRIMARY KEY, public_id TEXT UNIQUE, data TEXT, revision INTEGER DEFAULT 0)');
+ const decode=row=>row?{...row,data:JSON.parse(row.data)}:null;
+ const repository={
+  async owned(owner){return decode(db.prepare('SELECT * FROM workspaces WHERE owner_id=?').get(owner));},
+  async public(id){return decode(db.prepare('SELECT * FROM workspaces WHERE public_id=?').get(id));},
+  async create(owner,state){db.prepare('INSERT OR IGNORE INTO workspaces VALUES(?,?,?,0)').run(owner,crypto.randomUUID(),JSON.stringify(state));return this.owned(owner);},
+  async save(row,state){const result=db.prepare('UPDATE workspaces SET data=?,revision=revision+1 WHERE owner_id=? AND revision=?').run(JSON.stringify(state),row.owner_id,row.revision);return result.changes?{revision:row.revision+1}:null;},
+ };
+ for(const owner of ['test-owner','other-owner'])db.prepare('INSERT INTO workspaces VALUES(?,?,?,0)').run(owner,crypto.randomUUID(),JSON.stringify(sampleWorkspace()));
+ return {db,env:{repository,allowedOrigins:['https://renter.test'],publicBookingEnabled:true,authenticate:async token=>['test-owner','other-owner','new-owner'].includes(token)?{id:token,email:`${token}@example.com`}:null}};
+}
+function api(path,method='GET',input,owner='test-owner'){const headers={};if(owner)headers.Authorization=`Bearer ${owner}`;const hasBody=method==='POST'&&input!==undefined;if(hasBody)headers['Content-Type']='application/json';return new Request(`https://renter.test${path.replace('/api','/functions/v1/renter')}`,{method,headers,body:hasBody?JSON.stringify(input):undefined});}
 test('request quotes a rental and is not automatically confirmed',()=>{const state=request(fresh());const b=state.bookings[0];assert.equal(b.status,'Requested');assert.equal(b.price.total,6500);assert.equal(b.price.deposit,20000);});
+test('new verified owners start with an empty real business',async()=>{const {db,env}=database();const response=await handleApi(api('/api/workspace','GET',undefined,'new-owner'),env);assert.equal(response.status,200);const state=await response.json();assert.equal(state.demo,false);assert.equal(state.vehicles.length,0);assert.equal(state.bookings.length,0);db.close();});
+test('forged gateway identity and invalid bearer tokens cannot open owner records',async()=>{const {db,env}=database();const request=api('/api/workspace','GET',undefined,null);request.headers.set('oai-authenticated-user-id','test-owner');assert.equal((await handleApi(request,env)).status,401);assert.equal((await handleApi(api('/api/workspace','GET',undefined,'forged-token'),env)).status,401);db.close();});
+test('private review protects booking APIs even when called directly',async()=>{const {db,env}=database();env.publicBookingEnabled=false;const owner=await env.repository.owned('test-owner');assert.equal((await handleApi(api(`/api/public/${owner.public_id}`,'GET',undefined,null),env)).status,401);assert.equal((await handleApi(api(`/api/public/${owner.public_id}`,'GET',undefined,'other-owner'),env)).status,404);assert.equal((await handleApi(api(`/api/public/${owner.public_id}`),env)).status,200);db.close();});
+test('CORS permits only configured origins and preflight headers',async()=>{const {db,env}=database();const request=api('/api/workspace','OPTIONS',undefined,null);request.headers.set('Origin','https://renter.test');const response=await handleApi(request,env);assert.equal(response.status,204);assert.equal(response.headers.get('access-control-allow-origin'),'https://renter.test');request.headers.set('Origin','https://unknown.test');assert.equal((await handleApi(request,env)).status,403);db.close();});
+test('JSON null is rejected as a validation error',async()=>{const {db,env}=database();assert.equal((await handleApi(api('/api/commands','POST',null),env)).status,400);db.close();});
+test('function-name paths work and malformed business identifiers return 404',async()=>{const {db,env}=database();const request=api('/renter/workspace');assert.equal((await handleApi(request,env)).status,200);assert.equal((await handleApi(api('/api/public/not-a-uuid'),env)).status,404);db.close();});
 test('simultaneous unconfirmed enquiries may coexist; only one can be confirmed',()=>{let state=fresh();const start=future(24),end=future(48);state=request(state,start,end);const first=state.bookings[0].id;state=request(state,start,end);const second=state.bookings[0].id;state=confirm(state,first);assert.throws(()=>confirm(state,second),/reserved or in maintenance/);assert.equal(state.bookings.filter(b=>b.status==='Confirmed').length,1);});
 test('cancellation releases inventory but keeps the booking history',()=>{let state=confirm(request(fresh()));const b=state.bookings[0];state=applyCommand(state,command('cancel',{id:b.id}));assert.equal(conflict(state,'v1',b.start,b.end),undefined);assert.equal(state.bookings.length,1);});
 test('maintenance blocks prevent overlapping requests and confirmations',()=>{let state=fresh();const start=future(24),end=future(48);state=applyCommand(state,command('maintenance',{vehicleId:'v1',start,end,reason:'Service'}));assert.throws(()=>request(state,start,end),/maintenance/);});

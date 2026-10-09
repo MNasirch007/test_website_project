@@ -27,3 +27,6 @@ dist-ssr
 .env*
 !.env.example
 outputs/
+.dev.vars
+supabase/.temp/
+supabase/.branches/

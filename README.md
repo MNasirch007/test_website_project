@@ -1,34 +1,46 @@
 # Renter
 
-Renter is a React application for Pakistani car and motorcycle rental owners, with a customer booking page, a Cloudflare Worker API, and persistent D1 database storage. The first hosted release is private for review.
+React website for Pakistani car and bike rental owners. The active backend uses **Supabase Auth, Postgres, and Edge Functions**. Owners manage their fleet, availability, bookings, customers, handovers, returns, and cash/bank-transfer records. Customers use a separate booking page.
 
-## Run locally
+## Migration status
 
-Requires Node.js 24+ and npm.
+**Connected to the live Renter Supabase project `jsuumxbreyopbfscxexy`.** The Postgres migrations and `renter` Edge Function are deployed. The public frontend configuration is saved in ignored `.env.local` and in Sites runtime settings. Real owner login, persistence, customer requests, confirmation, payments, cancellation and sign-out passed live browser/API checks using temporary accounts, which were removed afterward. Email confirmation remains enabled; ordinary account email delivery still requires custom SMTP.
+
+The former D1 source, migrations, and local database are retained for recovery. They are not used by the active Wrangler configuration. Existing records have not been transferred: mapping the previous owner identity to a verified Supabase user must happen before any import. New Supabase accounts start with an empty business, never fictional customers or payments.
+
+## Connect and run locally
+
+Requires Node.js 24+ and npm. Connect the Supabase plugin and select the intended project, or authenticate the CLI locally with `npx supabase login`. Never paste an access token, database password, or service-role key into chat.
+
+After the project is provisioned as described in [docs/supabase-setup.md](docs/supabase-setup.md):
 
 ```powershell
 npm.cmd install
-npm.cmd run db:migrate
+Copy-Item .env.example .env.local
+```
+
+Set these **public** values in `.env.local`:
+
+```dotenv
+VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
+```
+
+```powershell
 npm.cmd run dev
 ```
 
-Open the local URL printed by Vite and choose **Sign in to your workspace**. The development server supplies a clearly scoped local test identity on loopback only. This is not a production authentication system. Hosted owner sign-in is provided by Sites / ChatGPT, and the backend scopes each workspace to its authenticated owner ID.
+Open the URL printed by Vite. Create an account, confirm its email, sign in, fill in **Settings**, then add vehicles and customers. The dev server does not manufacture a user identity. Restart it after dependency/configuration changes. Do not open `index.html` directly or use a static file server: React modules need Vite.
 
-The first visit creates a fictional sample workspace. Use **Set up your business** to discard the sample records and start an empty business before entering real customer information. Saving settings does not silently remove the sample label. Local preview records and hosted records live in separate databases.
+Local development uses plain Vite; the Cloudflare Worker integration runs only for production builds. This avoids the Miniflare `fetch failed` error from stale local Worker processes. Vite serves `/api/config` using the same public-key filter as the production Worker.
 
-## Implemented workflows
+The built local preview uses `npm.cmd run build` and `npm.cmd run preview`. For this preview, put the public `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in the ignored `.dev.vars`, or supply the Vite public values before building. Hosted configuration comes from Sites runtime environment variables; the website serves only those public values at `/api/config`.
 
-- Owner dashboard with live receipts, booking requests, current fleet state, today’s pickups/returns, overdue tasks, and recent activity.
-- Add/edit cars and bikes, daily rental rates, refundable security, mileage policies, city, specifications, and customer-facing descriptions. Pause listings without deleting booking history.
-- Customer booking page at `/book/<business-id>` with type/city filters, date-based availability, sorting, Pakistan local times, rental quote, owner policies, and request submission.
-- Requested → Confirmed → Active → Completed, plus cancellation. Customer requests require owner confirmation and do not reserve inventory themselves.
-- Atomic reservation updates with conflict checks, preparation buffers, dated maintenance blocks, extension checks, and stale-tab protection.
-- Handover checklist for identity/licence inspection, agreement acceptance, fuel, odometer and condition; return rejects a decreasing odometer. Chauffeur service uses an identity check without implying a customer driving licence is necessary.
-- Separate manual rental payments, security deposits, rental refunds, and deposit refunds. Security never contributes to rental receipts or pays off a rental balance.
-- Customer directory, booking/payment CSV exports, and a printable rental summary. CSV cells are escaped and protected against spreadsheet formula injection.
-- Responsive navigation, keyboard dialog focus, Escape dismissal, reduced motion, accessible labels, and business settings.
+## Private review
 
-## Commands and verification
+`RENTER_PUBLIC_BOOKING_ENABLED=false` is the backend default. A booking page at `/book/<business-id>` requires its owner's Supabase session during private review, including direct Edge Function calls. The hosted site's audience also remains private. A public launch requires enabling customer booking in Supabase and changing the site's audience explicitly.
+
+## Verification
 
 ```powershell
 npm.cmd test
@@ -38,33 +50,28 @@ npm.cmd run test:e2e
 npm.cmd audit
 ```
 
-The browser suite needs the local dev server running and Microsoft Edge installed; change the Playwright browser channel if using another installed Chromium browser. Tests create fictional browser-test requests in the sample local workspace and cancel them after the flow.
+The browser suite starts its own Vite server at `http://127.0.0.1:5175` with real Supabase configuration cleared, so contract tests cannot touch your live project. Microsoft Edge is required. `RENTER_TEST_URL` can target an existing test server only if its Supabase environment values are unset; do not point this fixture suite at the real configured app.
 
-Twenty backend tests cover the domain rules and actual SQLite-backed API handler: availability, cancellation, maintenance, extensions, pricing snapshots, deposit separation, refunds, idempotency, owner isolation, public data protection, request submission, concurrency and stale updates. Three browser tests cover navigation/search, the request-confirm-cancel flow, dialog keyboard behavior and mobile overflow. Browser screenshots are written to ignored `outputs/`.
-
-`npm.cmd run preview` runs the built Worker locally. It does not emulate hosted Sites sign-in routes; use the development server for interactive local review. The hosted release receives identity from Sites, while local production preview must be tested with explicit test identity headers on loopback only.
+Backend tests cover the real command handler, concurrent revision writes, idempotency, price snapshots, deposit separation, customer privacy, owner isolation, token rejection, private review and CORS. PGlite executes the actual Postgres migration and proves row-security and table grants. Browser contract tests use a **test-only** Supabase HTTP fixture plus the real rental handler to exercise signup, reset, sign-out, empty accounts, navigation, booking requests, confirmation/cancellation, keyboard dialogs and mobile layout. Separate live acceptance checks were completed against the connected project; see the setup guide for results and remaining integrations.
 
 ## Architecture
 
-- `src/`: React screens, dialogs, responsive styles, and original representative vehicle illustrations.
-- `shared/rental.js`: quote, date, availability and ledger helpers. Dates use `Asia/Karachi`; instants are stored as ISO timestamps. Prices are integer whole PKR; fractional-rupee pricing is not supported.
-- `server/commands.js`: authoritative validation and rental transitions. Customer writes can create requests only.
-- `server/worker.js`: owner-scoped API, public storefront API, request size/origin checks, and D1 persistence.
-- `db/schema.ts`, `drizzle/`: database schema and generated migration. Never edit an applied migration; append a new migration after schema changes.
-- `.openai/hosting.json`: Site ID and the `DB` binding. Build retains the Sites integration and outputs `dist/server`, `dist/client`, and migration metadata.
+- `src/backend.js`: Supabase client, session refresh, Edge Function calls and timeouts.
+- `src/Auth.jsx`: account creation, email/password sign-in, password reset and session gates.
+- `supabase/functions/renter/index.ts`: deployed Deno entrypoint; verifies owner tokens with Supabase Auth.
+- `supabase/functions/_shared/`: authoritative rental rules, request handler and Postgres repository. Root `shared/rental.js` and `server/commands.js` re-export the shared domain code for existing callers.
+- `supabase/migrations/`: owner-keyed Postgres table, row security and explicit grants. Browser users can read only their own workspace; all writes go through the validating Edge Function.
+- `server/site-worker.js`: website assets and public runtime configuration only. No rental data or authenticated operations live in this Worker.
+- `server/worker.js`, `db/`, `drizzle/`: retained prior D1 implementation, inactive.
 
-A small-business workspace is stored as one versioned document. Conditional updates check its revision atomically, so two writes cannot silently overwrite each other or both confirm conflicting reservations. This design is deliberately bounded to 3,000 bookings / roughly 1.5 MB per workspace; larger fleets and granular staff roles require normalized tables. The app rejects writes when that limit is reached.
+Each small business is one versioned JSON document in Postgres. A conditional owner/revision update commits changes atomically; stale owner tabs and competing confirmations cannot overwrite each other. This remains bounded to 3,000 bookings / about 1.5 MB; larger fleets and staff roles require normalized tables.
 
-No CNIC/licence copies, card details, or credentials are stored in browser storage. Customer reads omit other customers, private bookings, ledger records, and staff activity. A publicly accessible business identifier reveals only the intended storefront data. Hosted authentication depends on the Sites gateway; do not expose this Worker directly on an untrusted standalone host while trusting caller-supplied identity headers.
+Prices are whole PKR and rentals use started 24-hour periods in Asia/Karachi. Rental payments and refundable security have separate balances. Quotes preserve the rates agreed at booking. Customer requests require owner confirmation and reserve no vehicle by themselves.
 
-## Private release and remaining integrations
+## Operating limits
 
-The Site stays owner-private as requested, including the customer-page review. Public customer access requires an explicit public launch. An owner can review and submit requests from their private customer page now; external customers cannot access it while the Site is private.
+Payments record actual cash/bank-transfer activity entered by an owner. Online charging, automatic refunds, JazzCash/Easypaisa integration, SMS/WhatsApp, protected document uploads and vehicle photo uploads are not implemented. Auth email delivery for ordinary users needs a configured SMTP service. Supabase sessions persist through its client SDK; private rental records, CNIC scans, and card details are not stored in browser storage.
 
-Payments are an operational cash/bank-transfer ledger. No JazzCash/Easypaisa charge, automatic refund, email, SMS, WhatsApp message, or licence-verification API is simulated. Live checkout requires merchant onboarding, server secrets, verified callbacks, and idempotent transaction settlement. Uploaded vehicle photos, protected identity uploads, multi-staff roles, automated messaging, tax configuration, and backup restore testing are not part of this release.
+The customer endpoint has body limits, a honeypot and pending-request/phone limits. A public launch should also configure anti-abuse protection and monitor traffic. Test backups/restoration and replace the default rental policy with the business's actual terms before commercial operation.
 
-Replace the sample business phone, address, illustrative rates, coverage description, and rental terms with the owner’s actual details before trading. Billing is explicitly based on started 24-hour periods; workshop-day/hourly/monthly rental plans need their own billing rules. Extra fuel/mileage/damage/late-return charges are recorded only as agreed extras, not automatic penalties. The rental summary is not a signed contract or proof of a gateway payment.
-
-## Research and design
-
-The source-cited research is in [docs/rental-business-research.md](docs/rental-business-research.md). It documents local operator practices, car/bike/chauffeur differences, availability and pricing rules, payments, identity handling, product scope, and acceptance scenarios. [DESIGN.md](DESIGN.md) records the visual decisions.
+Original business research: [docs/rental-business-research.md](docs/rental-business-research.md). Visual decisions: [DESIGN.md](DESIGN.md).

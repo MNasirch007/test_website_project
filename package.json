@@ -9,31 +9,28 @@
     "lint": "oxlint",
     "preview": "wrangler dev --config dist/server/wrangler.json --local",
     "test": "node --test tests/*.test.js",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "wrangler d1 migrations apply renter-local --local",
+    "db:migrate": "supabase db push",
     "test:e2e": "playwright test",
-    "prebuild": "node -e \"require('node:fs').rmSync('dist', {recursive:true,force:true})\""
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', {recursive:true,force:true})\"",
+    "backend:deploy": "supabase functions deploy renter --use-api",
+    "backend:start": "supabase start"
   },
   "dependencies": {
-    "drizzle-orm": "^0.45.4",
+    "@supabase/supabase-js": "2.117.3",
     "lucide-react": "^1.54.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.63.1",
+    "@electric-sql/pglite": "0.5.8",
     "@playwright/test": "^1.64.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
-    "drizzle-kit": "^0.31.11",
     "oxlint": "^1.81.0",
+    "supabase": "2.120.0",
     "vite": "^8.3.0",
     "wrangler": "^4.149.0"
-  },
-  "overrides": {
-    "@esbuild-kit/core-utils": {
-      "esbuild": "^0.25.12"
-    }
   }
 }
